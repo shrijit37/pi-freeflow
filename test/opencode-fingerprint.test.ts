@@ -568,6 +568,119 @@ test("tool_choice is auto-or-absent on every Zen path", () => {
 	assert.equal(messagesAuto.tool_choice, "auto", "messages auto rides verbatim");
 });
 
+test("a replayed tool call with a malformed name is folded on the wire", () => {
+	// Captured live: space-bunny-free emitted a call named `id id=`, and Pi
+	// replays it in input[] forever, so every later turn 400s.
+	const body: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		input: [
+			{ role: "user", content: [{ type: "input_text", text: "go" }] },
+			{ type: "function_call", call_id: "call_983ed385be8d42d1a0841458", name: "id id=", arguments: "{}" },
+			{ type: "function_call_output", call_id: "call_983ed385be8d42d1a0841458", output: "ok" },
+			{ role: "user", content: [{ type: "input_text", text: "again" }] },
+		],
+	};
+	normalizeResponsesBody(body);
+	const items = body.input as Array<Record<string, unknown>>;
+	assert.equal(items[1].name, "id_id_", "the malformed call name is folded");
+	assert.equal(items[1].call_id, "call_983ed385be8d42d1a0841458", "the call id is untouched");
+	assert.equal(items[1].arguments, "{}", "arguments untouched");
+
+	const custom: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		input: [
+			{ type: "custom_tool_call", call_id: "c1", name: "xd://browser__open", input: "{}" },
+			{ type: "custom_tool_call", call_id: "c1", name: "bash", input: "{}" },
+		],
+	};
+	normalizeResponsesBody(custom);
+	const customItems = custom.input as Array<Record<string, unknown>>;
+	assert.equal(customItems[0].name, "xd___browser__open", "custom_tool_call folded too (one _ per invalid character)");
+	assert.equal(customItems[1].name, "bash", "a legal replayed call name rides verbatim");
+
+	// A `messages` body copied into `input` is covered by the same sweep.
+	const viaMessages: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		messages: [{ type: "function_call", call_id: "c2", name: "bad name", arguments: "{}" }],
+	};
+	normalizeResponsesBody(viaMessages);
+	assert.equal(
+		(viaMessages.input as Array<Record<string, unknown>>)[0].name,
+		"bad_name",
+		"chat leftovers copied into input[] are swept too",
+	);
+});
+
+test("dropping a forced tool call keeps the model's native reasoning on", () => {
+	// Captured live: OMP forces its synthetic `think` tool and switches native
+	// reasoning off with effort "none". Dropping the forced call must not leave
+	// the model reasoning-free, and "none" is itself rejected upstream.
+	const body: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		input: [{ role: "user", content: [{ type: "input_text", text: "go" }] }],
+		tool_choice: { type: "function", name: "think" },
+		reasoning: { effort: "none" },
+	};
+	normalizeResponsesBody(body);
+	assert.ok(!("tool_choice" in body), "the forced call is dropped");
+	assert.equal(
+		(body.reasoning as Record<string, unknown>).effort,
+		"xhigh",
+		"native reasoning is restored to the model's highest supported level",
+	);
+
+	const flat: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		input: "hi",
+		tool_choice: "required",
+		reasoning_effort: "none",
+	};
+	normalizeResponsesBody(flat);
+	assert.equal(flat.reasoning_effort, "xhigh", "the flat field is restored too");
+
+	const camel: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		input: "hi",
+		tool_choice: "required",
+		reasoningEffort: "none",
+	};
+	normalizeResponsesBody(camel);
+	assert.equal(camel.reasoningEffort, "xhigh", "the camelCase field is restored too");
+
+	// Genuine reasoning-off is the caller's real intent and must survive.
+	const genuineOff: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		input: "hi",
+		tool_choice: "required",
+		reasoning: { effort: "off" },
+	};
+	normalizeResponsesBody(genuineOff);
+	assert.equal((genuineOff.reasoning as Record<string, unknown>).effort, "off", "an explicit off is never rewritten");
+
+	// A supported effort is left exactly as the caller set it.
+	const chosen: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		input: "hi",
+		tool_choice: "required",
+		reasoning: { effort: "low" },
+	};
+	normalizeResponsesBody(chosen);
+	assert.equal((chosen.reasoning as Record<string, unknown>).effort, "low", "a supported effort is untouched");
+
+	// No forced call means no restore: the host's own value stands.
+	const untouched: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		input: "hi",
+		reasoning: { effort: "none" },
+	};
+	normalizeResponsesBody(untouched);
+	assert.equal(
+		(untouched.reasoning as Record<string, unknown>).effort,
+		"none",
+		"without a dropped forced call the host's value is left alone",
+	);
+});
+
 test("enforceOpencodeFingerprint: responses path normalizes before fingerprint", () => {
 	const body: Record<string, unknown> = {
 		model: "muse-spark-1.3-contributor-free",

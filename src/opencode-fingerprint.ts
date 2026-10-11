@@ -33,6 +33,7 @@ import {
  isOmpLikeCaller,
  restoreToolNameForCaller,
  retargetToolChoiceForUpstream,
+ sanitizeUpstreamToolName,
  translateToolsForPath,
  upstreamToolNameFor,
  type FindGlobRestore,
@@ -325,15 +326,89 @@ function stripCommentaryPhase(body: Record<string, unknown>): void {
  * tool_choice` — `"none"`, `"required"`, and named function choices alike
  * (measured live 2026-10-12 on `muse-spark-1.3-contributor-free`, responses and
  * chat). Absent means the same thing as `"auto"`, so an unsupported choice is
- * dropped rather than translated: the model picks its own tool, which is what
- * a host asking for a forced tool call cannot get from Zen anyway. A choice is
- * never imposed on a host that sent none.
+ * dropped rather than translated. A choice is never imposed on a host that
+ * sent none.
+ *
+ * Dropping a choice can leave a host's native reasoning switched off: OMP
+ * forces its synthetic `think` tool with `reasoning: { effort: "none" }`
+ * (captured request 2026-10-12), so removing the forced call without
+ * restoring native effort would run the model with no reasoning at all.
  */
 function enforceAutoToolChoice(body: Record<string, unknown>): void {
  const choice = body.tool_choice;
  if (choice === undefined) return;
  if (typeof choice === "string" && choice.trim().toLowerCase() === "auto") return;
  delete body.tool_choice;
+ restoreNativeEffortAfterChoiceDrop(body);
+}
+
+/**
+ * Put native reasoning back when the only thing enabling it was a dropped
+ * forced tool call.
+ *
+ * `"none"` is not a reasoning-off switch upstream, it is an unsupported value:
+ * `muse-spark-1.3-contributor-free` answers `400 reasoning_effort 'none' is
+ * not supported` (measured 2026-10-12). So the override is replaced with the
+ * model's own highest supported level rather than merely deleted, and a model
+ * whose declared map supports nothing but `off` gets the field dropped.
+ * Genuine reasoning-off (`"off"`) is the caller's real intent, never rewritten.
+ */
+function restoreNativeEffortAfterChoiceDrop(body: Record<string, unknown>): void {
+ const model = body.model;
+ if (typeof model !== "string") return;
+ const replacement = highestSupportedEffort(model);
+ if (replacement === null) return;
+ const nested = body.reasoning;
+ if (nested !== null && typeof nested === "object" && !Array.isArray(nested)) {
+  const rec = nested as Record<string, unknown>;
+  if (typeof rec.effort === "string" && rec.effort.trim().toLowerCase() === "none") {
+   rec.effort = replacement;
+   return;
+  }
+ }
+ for (const key of ["reasoning_effort", "reasoningEffort"] as const) {
+  const flat = body[key];
+  if (typeof flat === "string" && flat.trim().toLowerCase() === "none") {
+   body[key] = replacement;
+   return;
+  }
+ }
+}
+
+/**
+ * Highest non-null level a model's declared map supports, or null when the
+ * model declares no map or only supports `off` (nothing to fall back to).
+ */
+function highestSupportedEffort(model: string): string | null {
+ const map = getModelDef(model)?.thinkingLevelMap;
+ if (!map) return null;
+ for (const level of EFFORT_DESCENDING) {
+  if (map[level] !== null && map[level] !== undefined) return level;
+ }
+ return null;
+}
+
+/**
+ * Fold the name of a replayed tool-call item to a shape upstream accepts.
+ *
+ * A model can emit a malformed call and the host then replays it in `input[]`
+ * forever: upstream validates every replayed item, so one call named
+ * `id id=` (captured in a live session, emitted by `space-bunny-free`) 400s
+ * every subsequent turn of that conversation. Declarations were sanitized
+ * already; this covers the calls.
+ */
+function sanitizeReplayItemNames(body: Record<string, unknown>): void {
+ const input = body.input;
+ if (!Array.isArray(input)) return;
+ for (const item of input) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+  const record = item as Record<string, unknown>;
+  if (record.type !== "function_call" && record.type !== "custom_tool_call") continue;
+  const name = record.name;
+  if (typeof name !== "string") continue;
+  const folded = sanitizeUpstreamToolName(name, new Set());
+  if (folded !== name) record.name = folded;
+ }
 }
 
 /**
@@ -367,7 +442,9 @@ export function normalizeResponsesBody(body: Record<string, unknown>): void {
  }
  delete body.messages;
  stripCommentaryPhase(body);
- enforceAutoToolChoice(body);
+ // After input[] exists: a replayed call name is only folded once the array is
+ // the one upstream will read.
+ sanitizeReplayItemNames(body);
  if (body.max_output_tokens === undefined) {
   if (typeof body.max_tokens === "number") body.max_output_tokens = body.max_tokens;
   else if (typeof body.max_completion_tokens === "number") body.max_output_tokens = body.max_completion_tokens;
@@ -395,6 +472,9 @@ export function normalizeResponsesBody(body: Record<string, unknown>): void {
    }
   }
  }
+ // After the effort clamp: dropping a forced tool call is what triggers the
+ // native-effort restore, so it runs once clamping is settled.
+ enforceAutoToolChoice(body);
  if (body.store === undefined) body.store = false;
 }
 
