@@ -463,6 +463,64 @@ test("normalizeResponsesBody: auto + parallel true + ultra survive, non-spark un
 	assert.ok(!("tool_choice" in other), "{ type: none } dropped");
 });
 
+test("normalizeResponsesBody: a turn ending on a commentary message loses its phase", () => {
+	const user = { role: "user", content: [{ type: "input_text", text: "ok" }] };
+	const narration = () => ({
+		type: "message",
+		role: "assistant",
+		content: [{ type: "output_text", text: "Running the check now.", annotations: [] }],
+		status: "completed",
+		id: "rs_01a12c40f27b7642992f75b23eff6502",
+		phase: "commentary",
+	});
+
+	const terminal: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		input: [user, narration(), user],
+	};
+	normalizeResponsesBody(terminal);
+	const terminalItems = terminal.input as Array<Record<string, unknown>>;
+	assert.ok(!("phase" in terminalItems[1]), "terminal commentary phase dropped — upstream 400s on it");
+	assert.equal(terminalItems[1].id, "rs_01a12c40f27b7642992f75b23eff6502", "only the phase is rewritten");
+
+	const toolUse: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		input: [narration(), { type: "function_call", call_id: "call_1", name: "bash", arguments: "{}" }, user],
+	};
+	normalizeResponsesBody(toolUse);
+	assert.equal(
+		(toolUse.input as Array<Record<string, unknown>>)[0].phase,
+		"commentary",
+		"commentary followed by a tool call rides verbatim",
+	);
+
+	const finalAnswer: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		input: [{ ...narration(), phase: "final_answer" }, user],
+	};
+	normalizeResponsesBody(finalAnswer);
+	assert.equal(
+		(finalAnswer.input as Array<Record<string, unknown>>)[0].phase,
+		"final_answer",
+		"a terminal final answer is not the poisoned shape",
+	);
+
+	const reasoningTail: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		input: [
+			narration(),
+			{ type: "reasoning", id: "rs_a:rs_b", status: "completed", encrypted_content: "blob" },
+			user,
+		],
+	};
+	normalizeResponsesBody(reasoningTail);
+	assert.equal(
+		(reasoningTail.input as Array<Record<string, unknown>>)[0].phase,
+		"commentary",
+		"a reasoning tail is not an assistant message",
+	);
+});
+
 test("enforceOpencodeFingerprint: responses path normalizes before fingerprint", () => {
 	const body: Record<string, unknown> = {
 		model: "muse-spark-1.3-contributor-free",

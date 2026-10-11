@@ -284,6 +284,34 @@ export function ensureMessagesFingerprintTools(body: Record<string, unknown>, om
 }
 
 /**
+ * Drop `phase` from an assistant message item that ends its own turn.
+ *
+ * Upstream tags the lead-in text of a tool-calling turn `phase: "commentary"`
+ * and the closing answer `phase: "final_answer"`. When the model narrates a
+ * tool call and emits none (the muse-spark ATEM leak, upstream
+ * anomalyco/opencode#44659), that commentary item becomes the turn's last
+ * assistant item — and upstream then rejects every replay of that history
+ * with `400 invalid_request_error: The request contains invalid parameters`.
+ * Measured on `muse-spark-1.3-contributor-free`: a terminal commentary item
+ * 400s, while the same item followed by a function call or a final_answer
+ * item returns 200. The phase decides it, not the id prefix or the text, so
+ * only that field is dropped. Only the turn's last non-user item is touched;
+ * commentary that upstream accepted rides verbatim.
+ */
+function stripTerminalCommentaryPhase(body: Record<string, unknown>): void {
+ const input = body.input;
+ if (!Array.isArray(input)) return;
+ for (let i = input.length - 1; i >= 0; i -= 1) {
+  const item = input[i];
+  if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+  const record = item as Record<string, unknown>;
+  if (record.role === "user") continue;
+  if (record.role === "assistant" && record.phase === "commentary") delete record.phase;
+  return;
+ }
+}
+
+/**
  * Normalize a Zen Responses body to what upstream accepts. OMP/Pi hosts
  * sometimes carry Chat Completions leftovers on the responses path and
  * upstream rejects them with 400:
@@ -297,6 +325,9 @@ export function ensureMessagesFingerprintTools(body: Record<string, unknown>, om
  * - `tool_choice` is auto-or-absent: `"none"` (string or `{ type: "none" }`)
  *   is dropped, everything else rides (named choices still retarget find->glob).
  * - `store` defaults to false (never persisted server-side).
+ * - A turn whose last assistant item is a `phase: "commentary"` message loses
+   that phase; upstream 400s the whole request otherwise (see
+   stripTerminalCommentaryPhase).
  * - Reasoning effort is clamped per model: when the model's thinkingLevelMap
  *   declares the requested effort as null (unsupported), the effort is clamped
  *   to the highest supported level. Covers all OpenCode models generically
@@ -310,6 +341,7 @@ export function normalizeResponsesBody(body: Record<string, unknown>): void {
   body.input = body.messages;
  }
  delete body.messages;
+ stripTerminalCommentaryPhase(body);
  if (body.max_output_tokens === undefined) {
   if (typeof body.max_tokens === "number") body.max_output_tokens = body.max_tokens;
   else if (typeof body.max_completion_tokens === "number") body.max_output_tokens = body.max_completion_tokens;
