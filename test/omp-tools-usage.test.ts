@@ -22,6 +22,7 @@ import {
 	restoreToolNameForCaller,
 	retargetToolChoiceForUpstream,
 	translateToolsForPath,
+	sanitizeUpstreamToolName,
 	upstreamToolNameFor,
 } from "../src/tool-translation.ts";
 
@@ -319,7 +320,20 @@ for (const fx of ALL_FIXTURES) {
 				const [out] = translateToolsForPath([input], path);
 				const where = `${style} -> ${path} ${fx.name}`;
 				assert.ok(out, `${where}: not dropped`);
-				assert.equal(upstreamNameOf(out), fx.name, `${where}: name verbatim, never renamed/coerced`);
+				// A name the upstream shape forbids (`:` and `/` are outside
+				// `^[a-zA-Z0-9_.-]+$`) is folded on the wire and restored
+				// downstream, so the caller still gets its own name back.
+				const restore = buildFindGlobRestore([input]);
+				assert.equal(
+					restoreToolNameForCaller(upstreamNameOf(out), restore),
+					fx.name,
+					`${where}: caller's own name always comes back`,
+				);
+				assert.equal(
+					upstreamNameOf(out),
+					sanitizeUpstreamToolName(fx.name, new Set()),
+					`${where}: wire name is the caller's, folded only if upstream would reject it`,
+				);
 				assert.equal(upstreamDescOf(out), fx.description, `${where}: description verbatim`);
 				assert.deepEqual(upstreamParamsOf(out), fx.parameters, `${where}: params verbatim`);
 				if (typeof fx.strict === "boolean") {
@@ -332,8 +346,10 @@ for (const fx of ALL_FIXTURES) {
 					!JSON.stringify(upstreamParamsOf(out)).includes("additionalProperties"),
 					`${where}: never injects additionalProperties`,
 				);
-				if (style === styleForPath(path)) {
-					assert.equal(out, input, `${where}: same shape passes through verbatim (identical reference)`);
+				if (style === styleForPath(path) && upstreamNameOf(out) === fx.name) {
+					// Identity holds only when nothing had to be rewritten: a
+					// folded name necessarily produces a new object.
+					assert.equal(out, input, `${where}: same shape, unrewritten name passes through by reference`);
 				}
 			}
 		}

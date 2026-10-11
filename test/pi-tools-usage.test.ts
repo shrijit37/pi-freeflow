@@ -6,6 +6,7 @@ import {
 	restoreToolNameForCaller,
 	retargetToolChoiceForUpstream,
 	translateToolsForPath,
+	sanitizeUpstreamToolName,
 	upstreamToolNameFor,
 } from "../src/tool-translation.ts";
 
@@ -374,7 +375,25 @@ test("pi usage: custom registerTool envelope keeps unbounded name with constrain
 				[mkTool("responses", name, "custom review", customParams, { strict: true, constrainedSampling })],
 				path,
 			);
-			assert.equal(upstreamNameOf(out), name, `${path}: unbounded custom name verbatim`);
+			// A custom name is unconstrained by the host, so it can carry
+			// characters the upstream shape forbids (`Review-Bot v2`). Such a
+			// name is folded on the wire and restored on the way home; the
+			// caller still gets its own name back.
+			const callerName = name as string;
+			const wireName = upstreamNameOf(out) as string;
+			const restore = buildFindGlobRestore([
+				mkTool("responses", callerName, "custom review", customParams, { strict: true, constrainedSampling }),
+			]);
+			assert.equal(
+				restoreToolNameForCaller(wireName, restore),
+				callerName,
+				`${path}: caller's own custom name comes back`,
+			);
+			assert.equal(
+				wireName,
+				sanitizeUpstreamToolName(callerName, new Set()),
+				`${path}: wire name folded only where upstream would reject it`,
+			);
 			assert.deepEqual(upstreamParamsOf(out), customParams, `${path}: custom params verbatim`);
 			assert.equal((out as Record<string, unknown>).strict, true, `${path}: resolved strict rides along`);
 			assert.deepEqual(

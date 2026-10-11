@@ -215,12 +215,16 @@ function callerTool(name: string): Record<string, unknown> {
 }
 
 /**
- * Upstream name for a caller tool. `find` is deliberately declared as `glob`
- * so the upstream gate sees the tool it expects; `restoreToolNameForCaller`
- * maps it back on the way home. Every other name rides verbatim.
+ * Wire name for a caller tool. `find` is deliberately declared as `glob` so the
+ * upstream gate sees the tool it expects, and `restoreToolNameForCaller` maps
+ * it back on the way home. A name the upstream shape forbids (`:` and `/` are
+ * not in `^[a-zA-Z0-9_.-]+$`) is folded character-for-character and restored
+ * downstream. Every other name rides verbatim — the model sees the same name
+ * it always saw.
  */
 function upstreamName(name: string): string {
-	return name === "find" ? "glob" : name;
+	if (name === "find") return "glob";
+	return name.replace(/[^a-zA-Z0-9_.-]/g, "_");
 }
 
 test("every host tool name survives translation on every wire shape", () => {

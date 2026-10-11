@@ -119,7 +119,7 @@ test("enforceOpencodeFingerprint: tool-less body gains 6 injected tools and stre
 	assert.deepEqual(names, ["bash", "edit", "glob", "grep", "read", "write"]);
 });
 
-test("enforceOpencodeFingerprint: Bash lowercased without dup, tool_choice retargeted, host tools kept", () => {
+test("enforceOpencodeFingerprint: Bash lowercased without dup, host tools kept", () => {
 	const body: Record<string, unknown> = {
 		stream: true,
 		tools: [
@@ -129,6 +129,8 @@ test("enforceOpencodeFingerprint: Bash lowercased without dup, tool_choice retar
 			{ type: "function", function: { name: "powershell", description: "ps" } },
 			{ type: "function", function: { name: "find", description: "find" } },
 		],
+		// Zen accepts only "auto", so a named choice is dropped rather than
+		// retargeted: it cannot reach upstream in any form.
 		tool_choice: { type: "function", function: { name: "Bash" } },
 	};
 	const r = enforceOpencodeFingerprint(body, "/v1/chat/completions");
@@ -142,12 +144,14 @@ test("enforceOpencodeFingerprint: Bash lowercased without dup, tool_choice retar
 	assert.ok(names.includes("powershell"), "caller powershell never dropped");
 	assert.ok(names.includes("glob"), "Pi find rides upstream as glob");
 	assert.deepEqual(r.injected, ["grep", "read", "edit", "write"], "bash+glob declared upstream, rest injected");
-	assert.deepEqual(body.tool_choice, { type: "function", function: { name: "bash" } });
+	assert.ok(!("tool_choice" in body), "named choice dropped — Zen supports only auto");
 });
 
-test("enforceOpencodeFingerprint: caller tool_choice naming find rides upstream as glob", () => {
-	// Translator gap: the find declaration was renamed to glob upstream while a
-	// caller tool_choice naming find was left dangling. Both shapes retarget.
+test("enforceOpencodeFingerprint: a find declaration still rides upstream as glob", () => {
+	// The find declaration is renamed to glob upstream so the sextet is
+	// satisfied. The caller's tool_choice naming find is dropped instead of
+	// retargeted: Zen rejects every choice but "auto", so retargeting it to
+	// glob would only produce another 400.
 	const body: Record<string, unknown> = {
 		model: "m",
 		stream: true,
@@ -158,19 +162,20 @@ test("enforceOpencodeFingerprint: caller tool_choice naming find rides upstream 
 	const names = (body.tools as Array<{ function: { name: string } }>).map((t) => t.function.name);
 	assert.ok(names.includes("glob"), "find declaration renamed to glob upstream");
 	assert.ok(!names.some((n) => n.toLowerCase() === "find"), "no dangling find declaration");
-	assert.deepEqual(body.tool_choice, { type: "function", function: { name: "glob" } });
+	assert.ok(!("tool_choice" in body), "named choice dropped");
 	for (const t of ["bash", "glob", "grep", "read", "edit", "write"]) {
 		assert.ok(names.includes(t), `sextet complete upstream: ${t}`);
 	}
 	assert.ok(!r.injected.includes("glob"), "caller-supplied glob is not re-injected");
-	const stringChoice: Record<string, unknown> = {
-		stream: true,
+
+	const autoChoice: Record<string, unknown> = {
+		model: "m",
 		tools: [{ type: "function", function: { name: "find", description: "f", parameters: { type: "object" } } }],
-		tool_choice: "find",
+		tool_choice: "auto",
 	};
-	enforceOpencodeFingerprint(stringChoice, "/v1/responses");
-	assert.equal(stringChoice.tool_choice, "glob", "string choice retargets too");
-	assert.equal(stringChoice.store, false, "responses cloak still applies");
+	enforceOpencodeFingerprint(autoChoice, "/v1/responses");
+	assert.equal(autoChoice.tool_choice, "auto", "auto rides verbatim");
+	assert.equal(autoChoice.store, false, "responses cloak still applies");
 });
 
 test("normalizePlaceholderCase + retargetToolChoice: bounded per-request restore", () => {
@@ -463,7 +468,7 @@ test("normalizeResponsesBody: auto + parallel true + ultra survive, non-spark un
 	assert.ok(!("tool_choice" in other), "{ type: none } dropped");
 });
 
-test("normalizeResponsesBody: a turn ending on a commentary message loses its phase", () => {
+test("normalizeResponsesBody: every assistant commentary item loses its phase", () => {
 	const user = { role: "user", content: [{ type: "input_text", text: "ok" }] };
 	const narration = () => ({
 		type: "message",
@@ -482,43 +487,85 @@ test("normalizeResponsesBody: a turn ending on a commentary message loses its ph
 	const terminalItems = terminal.input as Array<Record<string, unknown>>;
 	assert.ok(!("phase" in terminalItems[1]), "terminal commentary phase dropped — upstream 400s on it");
 	assert.equal(terminalItems[1].id, "rs_01a12c40f27b7642992f75b23eff6502", "only the phase is rewritten");
-
-	const toolUse: Record<string, unknown> = {
-		model: "muse-spark-1.3-contributor-free",
-		input: [narration(), { type: "function_call", call_id: "call_1", name: "bash", arguments: "{}" }, user],
-	};
-	normalizeResponsesBody(toolUse);
-	assert.equal(
-		(toolUse.input as Array<Record<string, unknown>>)[0].phase,
-		"commentary",
-		"commentary followed by a tool call rides verbatim",
+	assert.deepEqual(
+		terminalItems[1].content,
+		[{ type: "output_text", text: "Running the check now.", annotations: [] }],
+		"the text the model reads is untouched",
 	);
 
-	const finalAnswer: Record<string, unknown> = {
+	// A host may seat instruction items between a commentary item and the next
+	// user message, so a tail-only sweep would miss it. Upstream validates the
+	// whole replayed history, so every commentary item goes.
+	const withSystemBetween: Record<string, unknown> = {
 		model: "muse-spark-1.3-contributor-free",
-		input: [{ ...narration(), phase: "final_answer" }, user],
+		input: [narration(), { role: "developer", content: "extra tools" }, user],
 	};
-	normalizeResponsesBody(finalAnswer);
-	assert.equal(
-		(finalAnswer.input as Array<Record<string, unknown>>)[0].phase,
-		"final_answer",
-		"a terminal final answer is not the poisoned shape",
+	normalizeResponsesBody(withSystemBetween);
+	assert.ok(
+		!("phase" in (withSystemBetween.input as Array<Record<string, unknown>>)[0]),
+		"commentary followed by a developer item is still swept",
 	);
 
-	const reasoningTail: Record<string, unknown> = {
+	// An earlier turn's commentary must not come back once later turns append.
+	const twoTurns: Record<string, unknown> = {
 		model: "muse-spark-1.3-contributor-free",
 		input: [
-			narration(),
-			{ type: "reasoning", id: "rs_a:rs_b", status: "completed", encrypted_content: "blob" },
+			{ ...narration(), id: "rs_turn_one" },
+			user,
+			{ ...narration(), id: "rs_turn_two", phase: "final_answer" },
 			user,
 		],
 	};
-	normalizeResponsesBody(reasoningTail);
-	assert.equal(
-		(reasoningTail.input as Array<Record<string, unknown>>)[0].phase,
-		"commentary",
-		"a reasoning tail is not an assistant message",
-	);
+	normalizeResponsesBody(twoTurns);
+	const twoTurnItems = twoTurns.input as Array<Record<string, unknown>>;
+	assert.ok(!("phase" in twoTurnItems[0]), "earlier turn's commentary swept too");
+	assert.equal(twoTurnItems[2].phase, "final_answer", "final_answer is not the rejected shape");
+});
+
+test("tool_choice is auto-or-absent on every Zen path", () => {
+	const unsupported = ["none", "required", "any"] as const;
+	for (const value of unsupported) {
+		const body: Record<string, unknown> = { model: "muse-spark-1.3-contributor-free", input: "hi", tool_choice: value };
+		normalizeResponsesBody(body);
+		assert.ok(!("tool_choice" in body), `"${value}" dropped — Zen supports only auto`);
+	}
+	const named: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		input: "hi",
+		tool_choice: { type: "function", name: "bash" },
+	};
+	normalizeResponsesBody(named);
+	assert.ok(!("tool_choice" in named), "named function choice dropped");
+
+	const auto: Record<string, unknown> = {
+		model: "muse-spark-1.3-contributor-free",
+		input: "hi",
+		tool_choice: "auto",
+	};
+	normalizeResponsesBody(auto);
+	assert.equal(auto.tool_choice, "auto", "auto rides verbatim");
+
+	const chat: Record<string, unknown> = { model: "big-pickle", messages: [], tool_choice: "required" };
+	enforceOpencodeFingerprint(chat, "/v1/chat/completions");
+	assert.ok(!("tool_choice" in chat), "chat path drops an unsupported choice too");
+
+	const chatNone: Record<string, unknown> = { model: "big-pickle", messages: [], tool_choice: "none" };
+	enforceOpencodeFingerprint(chatNone, "/v1/chat/completions");
+	assert.ok(!("tool_choice" in chatNone), "chat path still drops none");
+
+	const chatAuto: Record<string, unknown> = { model: "big-pickle", messages: [], tool_choice: "auto" };
+	enforceOpencodeFingerprint(chatAuto, "/v1/chat/completions");
+	assert.equal(chatAuto.tool_choice, "auto", "chat auto rides verbatim");
+
+	// The messages path shares the chat branch: Zen accepts only auto there
+	// too, so an unsupported choice is dropped rather than passed through.
+	const messagesPath: Record<string, unknown> = { model: "claude-fable-5", messages: [], tool_choice: "required" };
+	enforceOpencodeFingerprint(messagesPath, "/v1/messages");
+	assert.ok(!("tool_choice" in messagesPath), "messages path drops an unsupported choice too");
+
+	const messagesAuto: Record<string, unknown> = { model: "claude-fable-5", messages: [], tool_choice: "auto" };
+	enforceOpencodeFingerprint(messagesAuto, "/v1/messages");
+	assert.equal(messagesAuto.tool_choice, "auto", "messages auto rides verbatim");
 });
 
 test("enforceOpencodeFingerprint: responses path normalizes before fingerprint", () => {

@@ -25,6 +25,7 @@ import {
 	restoreToolChoiceForCaller,
 	restoreToolNameForCaller,
 	retargetToolChoiceForUpstream,
+	sanitizeUpstreamToolName,
 	toAnthropicTool,
 	toChatTool,
 	toResponsesTool,
@@ -403,18 +404,26 @@ test("translateToolsForPath: matrix shared + OMP uniques survive verbatim, no ad
 		}
 	}
 });
-test("translateToolsForPath: unknown mcp custom xd tools pass verbatim on every shape x path", () => {
+test("translateToolsForPath: unknown mcp custom tools survive every shape x path", () => {
 	const names = ["mcp__github__search_code", "my_custom_tool", "xd://browser__open", "some_unknown_tool_xyz"];
 	for (const style of ["chat", "responses", "anthropic"] as const) {
 		for (const path of PATHS) {
 			const input = names.map((name) => matrixTool(style, name));
+			const restore = buildFindGlobRestore(input);
 			const out = translateToolsForPath(input, path);
 			assert.equal(out.length, names.length, `${style} -> ${path}: nothing dropped`);
 			for (const name of names) {
-				const found = out.find((t) => upstreamNameOf(t) === name);
-				assert.ok(found, `${style} -> ${path}: keeps ${name}`);
-				assert.deepEqual(upstreamParamsOf(found!), { type: "object", properties: { [name]: { type: "string" } } });
-				assert.ok(!JSON.stringify(upstreamParamsOf(found!)).includes("additionalProperties"));
+				// Looked up by the name the caller gets back: a caller name
+				// upstream rejects (`xd://…`) is rewritten on the wire and
+				// restored here, so this asserts the round-trip, not the wire
+				// spelling. Everything else is byte-identical.
+				const upstreamName = upstreamNameOf(
+					out.find((t) => restoreToolNameForCaller(upstreamNameOf(t), restore) === name)!,
+				);
+				assert.ok(out.some((t) => upstreamNameOf(t) === upstreamName), `${style} -> ${path}: keeps ${name}`);
+				const found = out.find((t) => upstreamNameOf(t) === upstreamName)!;
+				assert.deepEqual(upstreamParamsOf(found), { type: "object", properties: { [name]: { type: "string" } } });
+				assert.ok(!JSON.stringify(upstreamParamsOf(found)).includes("additionalProperties"));
 			}
 		}
 	}
@@ -826,4 +835,92 @@ test("contract: prompt_cache_key rides the Zen responses path untouched, never a
 	};
 	enforceOpencodeFingerprint(chatBody, "/v1/chat/completions");
 	assert.equal(chatBody.prompt_cache_key, key, "chat enforce never strips the conversation key");
+});
+
+test("sanitizeUpstreamToolName: legal names are returned unchanged", () => {
+	const taken = new Set<string>();
+	for (const name of ["bash", "read", "write", "edit", "grep", "glob", "todo_write", "web.search", "mcp--srv.tool", "a-b.c"]) {
+		assert.equal(sanitizeUpstreamToolName(name, taken), name, `${name} must not be rewritten`);
+		taken.add(name.toLowerCase());
+	}
+});
+
+test("sanitizeUpstreamToolName: illegal characters fold to underscores", () => {
+	const taken = new Set<string>();
+	// Names measured in live Pi sessions.
+	assert.equal(sanitizeUpstreamToolName("TG drive", taken), "TG_drive");
+	taken.add("tg_drive");
+	assert.equal(sanitizeUpstreamToolName("env:production", taken), "env_production");
+	assert.equal(sanitizeUpstreamToolName("mcp:server__tool", taken), "mcp_server__tool");
+	assert.equal(sanitizeUpstreamToolName("fs/read", taken), "fs_read");
+	assert.equal(sanitizeUpstreamToolName("a b", taken), "a_b");
+});
+
+test("sanitizeUpstreamToolName: a collision takes a numeric suffix", () => {
+	const taken = new Set<string>();
+	assert.equal(sanitizeUpstreamToolName("TG drive", taken), "TG_drive");
+	taken.add("tg_drive");
+	assert.equal(sanitizeUpstreamToolName("TG:drive", taken), "TG_drive_2");
+	taken.add("tg_drive_2");
+	// `!` folds to `_`, which is legal and unclaimed, so no suffix is needed.
+	assert.equal(sanitizeUpstreamToolName("TG drive!", taken), "TG_drive_");
+	taken.add("tg_drive_");
+	// Now it genuinely collides, so the suffix loop takes over.
+	assert.equal(sanitizeUpstreamToolName("TG drive?", taken), "TG_drive__2");
+	assert.equal(sanitizeUpstreamToolName("TG-drive", new Set()), "TG-drive", "a legal name never collides");
+});
+
+test("tool names upstream would reject are rewritten and restored downstream", () => {
+	const tools = [
+		{ type: "function", name: "TG drive", description: "a", parameters: { type: "object", properties: {} } },
+		{ type: "function", name: "TG:drive", description: "b", parameters: { type: "object", properties: {} } },
+		{ type: "function", name: "bash", description: "c", parameters: { type: "object", properties: {} } },
+	];
+	const restore = buildFindGlobRestore(tools);
+
+	for (const path of ["/v1/responses", "/v1/chat/completions", "/v1/messages"]) {
+		const translated = translateToolsForPath(tools, path);
+		const names = translated.map((t) => toolNameOf(t));
+		for (const name of names) {
+			assert.match(name, /^[a-zA-Z0-9_.-]+$/, `${path}: ${name} must satisfy upstream`);
+		}
+		assert.deepEqual(
+			names.map((n) => restoreToolNameForCaller(n, restore)),
+			["TG drive", "TG:drive", "bash"],
+			`${path}: every caller's own name comes back`,
+		);
+		assert.equal(names[2], "bash", `${path}: a legal name is never rewritten`);
+	}
+
+	const responses = translateToolsForPath(tools, "/v1/responses");
+	assert.deepEqual(
+		responses.map((t) => (t as Record<string, unknown>).name),
+		["TG_drive", "TG_drive_2", "bash"],
+		"colliding illegal names get distinct upstream names",
+	);
+	const chat = translateToolsForPath(tools, "/v1/chat/completions");
+	assert.deepEqual(
+		chat.map((t) => (t as Record<string, Record<string, unknown>>).function.name),
+		["TG_drive", "TG_drive_2", "bash"],
+		"chat wrapper carries the same upstream names",
+	);
+});
+
+test("a sanitized tool name round-trips through a full streamed response", () => {
+	const tools = [
+		{ type: "function", name: "TG drive", description: "d", parameters: { type: "object", properties: {} } },
+	];
+	const restore = buildFindGlobRestore(tools);
+	const sse = [
+		'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_x","object":"response","status":"completed","output":[{"type":"function_call","id":"fc_x","name":"TG_drive","arguments":"{}"}]}}',
+	].join("\n\n");
+	const resp = sseToResponsesJson(sse, true, undefined, restore, []) as {
+		output: Array<{ type: string; name?: string }>;
+	};
+	const calls = resp.output.filter((o) => o.type === "function_call");
+	assert.deepEqual(
+		calls.map((c) => c.name),
+		["TG drive"],
+		"the model called the sanitized name; the caller must still get its own",
+	);
 });

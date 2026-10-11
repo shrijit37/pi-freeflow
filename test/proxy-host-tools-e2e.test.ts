@@ -172,7 +172,9 @@ test("proxy e2e: chat non-stream carries mixed host tools upstream and restores 
 	assert.ok(upstream);
 	assert.equal(upstream.stream, true, "upstream must receive stream:true");
 	assert.ok(!("store" in upstream), "chat must not carry store");
-	assert.deepEqual(upstream.tool_choice, callerChoice, "tool_choice must be carried, not imposed");
+	// Zen free tier accepts only "auto", so a named caller choice is dropped
+	// rather than carried: it cannot reach upstream in any form.
+	assert.ok(!("tool_choice" in upstream), "an unsupported tool_choice never reaches upstream");
 	assert.ok(Array.isArray(upstream.tools));
 	const tools = upstream.tools as Array<unknown>;
 	assert.equal(tools.length, 12, "8 caller tools translated + 4 injected (3 real defs + cloaked edit, OMP-like caller)");

@@ -332,31 +332,100 @@ export function upstreamToolNameFor(name: string): string {
  return isFindToolName(name) ? "glob" : name.trim();
 }
 /**
- * Restore record for the find->glob rename. True only when the caller sent
- * `find` (any case) without also sending `glob`: the single upstream `glob`
- * unambiguously stands for the caller `find`. When the caller sent both,
- * upstream collapses to one `glob` (first-seen wins) and no restore applies.
+ * Restore records for the upstream-name rewrites: `find`->`glob` and the
+ * sanitization of names upstream rejects. `renamed` maps every rewritten
+ * upstream name (lowercased) back to the caller's original, so an emitted
+ * call still resolves to the tool the caller actually registered.
+ *
+ * `renamedFindToGlob` is true only when the caller sent `find` (any case)
+ * without also sending `glob`: the single upstream `glob` unambiguously stands
+ * for the caller `find`. When the caller sent both, upstream collapses to one
+ * `glob` (first-seen wins) and no single-name restore applies.
  */
 export interface FindGlobRestore {
- renamedFindToGlob: boolean;
+	renamedFindToGlob: boolean;
+	/** Sanitized upstream name (lowercased) -> caller name. Absent when every
+	 * caller name was already upstream-legal, so nothing was rewritten. */
+	renamed?: Record<string, string>;
 }
-/** Inspect the original caller tools (pre-translate) for the find->glob case. */
+
+/**
+ * Upstream accepts only `^[a-zA-Z0-9_.-]+$` as a tool name and answers
+ * `400 \`name\` must match` otherwise. Hosts do send such names — measured in
+ * live Pi sessions: `TG drive` (space), `env:production` (colon) — so the
+ * whole request dies on one badly named tool.
+ *
+ * Every character outside the allowed set folds to `_`, and a collision with
+ * an already-emitted name gets a numeric suffix. The caller name is recorded
+ * so `restoreToolNameForCaller` puts it back; the model never sees a name it
+ * cannot match against its own earlier call. A name that already matches is
+ * returned unchanged, so well-formed tool sets are untouched.
+ */
+const UPSTREAM_NAME_SHAPE = /^[a-zA-Z0-9_.-]+$/;
+
+/**
+ * Fold one caller tool name to a shape upstream accepts. Deterministic, and a
+ * pure function of the name: the same input always sanitizes to the same
+ * output, which is what lets the caller name be recovered downstream.
+ */
+export function sanitizeUpstreamToolName(name: string, taken: ReadonlySet<string>): string {
+	const trimmed = name.trim();
+	if (UPSTREAM_NAME_SHAPE.test(trimmed)) return trimmed;
+	let folded = trimmed.replace(/[^a-zA-Z0-9_.-]/g, "_");
+	// A name made entirely of invalid characters would sanitize to a leading
+	// run of underscores and collide with every other such name; anchor it.
+	if (folded.length === 0) folded = "tool";
+	let candidate = folded;
+	let n = 2;
+	while (taken.has(candidate.toLowerCase())) {
+		candidate = `${folded}_${n}`;
+		n += 1;
+	}
+	return candidate;
+}
+/** Inspect the original caller tools (pre-translate) for the rewrite cases. */
 export function buildFindGlobRestore(callerTools: unknown[]): FindGlobRestore {
- let sawFind = false;
- let sawGlob = false;
- for (const tool of callerTools) {
-  const canon = canonicalizeTool(tool);
-  if (!canon) continue;
-  if (isFindToolName(canon.name)) sawFind = true;
-  else if (canon.name.trim().toLowerCase() === "glob") sawGlob = true;
-  if (sawFind && sawGlob) break;
- }
- return { renamedFindToGlob: sawFind && !sawGlob };
+	let sawFind = false;
+	let sawGlob = false;
+	const renamed: Record<string, string> = {};
+	// Same first-seen-wins order and case rules as translateToolsForPath, so
+	// the recorded map keys match the names that actually reach upstream.
+	const seen = new Set<string>();
+	for (const tool of callerTools) {
+		const canon = canonicalizeTool(tool);
+		if (!canon) continue;
+		const callerName = canon.name;
+		if (isFindToolName(callerName)) sawFind = true;
+		else if (callerName.trim().toLowerCase() === "glob") sawGlob = true;
+		// Mirrors translateToolsForPath: dedup on the lowercased
+		// pre-sanitization name (a collapsed duplicate never reaches upstream),
+		// then sanitize with the caller's casing intact.
+		const dedupKey = upstreamToolNameFor(callerName).toLowerCase();
+		if (seen.has(dedupKey)) continue;
+		seen.add(dedupKey);
+		const sanitized = sanitizeUpstreamToolName(upstreamToolNameFor(callerName), seen);
+		if (sanitized.toLowerCase() !== dedupKey) seen.add(sanitized.toLowerCase());
+		// Only character-folding rewrites belong in the sanitized map. The
+		// find->glob rename is a collision case with its own flag: when the
+		// caller also sent `glob`, upstream `glob` really is the caller's glob,
+		// so recording it here would misroute a genuine call.
+		if (sanitized !== callerName && !isFindToolName(callerName)) {
+			renamed[sanitized.toLowerCase()] = callerName;
+		}
+	}
+	const restored: FindGlobRestore = { renamedFindToGlob: sawFind && !sawGlob, renamed };
+	return restored;
 }
-/** Downstream name: map the upstream `glob` back to caller `find` when renamed. */
+/**
+ * Downstream name: undo the upstream rewrites. The sanitized map is checked
+ * first because it is keyed by the exact name upstream saw; the find->glob
+ * case stays as the single-name fallback.
+ */
 export function restoreToolNameForCaller(name: string, restore: FindGlobRestore): string {
- if (restore.renamedFindToGlob && name.trim().toLowerCase() === "glob") return "find";
- return name;
+	const sanitized = restore.renamed?.[name.trim().toLowerCase()];
+	if (sanitized !== undefined) return sanitized;
+	if (restore.renamedFindToGlob && name.trim().toLowerCase() === "glob") return "find";
+	return name;
 }
 function retargetChoice(value: unknown, from: string, to: string): unknown {
  if (typeof value === "string") {
@@ -447,18 +516,25 @@ export function translateToolsForPath(tools: unknown[], pathname: string): Recor
    out.push(rec);
    continue;
   }
-  const upstreamName = upstreamToolNameFor(canon.name);
-  const key = upstreamName.toLowerCase();
-  if (seen.has(key)) continue;
-  seen.add(key);
-  const needsRename = upstreamName !== canon.name;
-  if (!needsRename && alreadyTargetShape(rec, api)) {
-   out.push(rec);
-   continue;
-  }
-  const renamed: CanonicalTool = needsRename
-   ? { ...canon, name: upstreamName }
-   : canon;
+ // Duplicate collapse stays first-seen-wins on the lowercased upstream name
+ // (`Bash` never duplicates `bash`, `find` collapses with `glob`) and runs on
+ // the pre-sanitization name: the emitted name keeps the caller's casing, and
+ // the sanitizer only ever folds characters the upstream shape forbids.
+ const dedupKey = upstreamToolNameFor(canon.name).toLowerCase();
+ if (seen.has(dedupKey)) continue;
+ seen.add(dedupKey);
+ // The find->glob rename and the name sanitization share one upstream name,
+ // so a caller tool needing either is emitted under a single new name.
+ const upstreamName = sanitizeUpstreamToolName(upstreamToolNameFor(canon.name), seen);
+ if (upstreamName.toLowerCase() !== dedupKey) seen.add(upstreamName.toLowerCase());
+ const needsRename = upstreamName !== canon.name;
+ if (!needsRename && alreadyTargetShape(rec, api)) {
+  out.push(rec);
+  continue;
+ }
+ const renamed: CanonicalTool = needsRename
+  ? { ...canon, name: upstreamName }
+  : canon;
   const converted =
    api === "responses"
     ? toResponsesTool(renamed)
