@@ -61,6 +61,7 @@ test("1M context window models are properly configured", () => {
 		"cline-free/muse-spark-1.3-contributor",
 		"z-ai/glm-5.3-flash",
 		"mimo-v2.6-flash-free",
+		"deepseek-v4.1-flash-free",
 		"stepfun/step-5-preview-free",
 		"step-5-preview-free",
 		"space-bunny-free",
@@ -249,6 +250,17 @@ test("catalog spec lock: live-verified ctx/max/reasoning per model", () => {
 	// specs per models.dev opencode/step-5-preview-free + StepFun docs: 1M ctx / 64K max,
 	// text+image+video, efforts low/medium/high — minimal explicitly null, xhigh/max null)
 	"step-5-preview-free": { ctx: 1_000_000, max: 65_536, reasoning: true },
+  // Added 2026-10-15 (live: Zen /v1/models listing + gated-lane 200 carrying the
+  // full fingerprint; chat-only, /v1/responses answers 400 ModelProtocolUnsupported).
+  // Context measured, NOT published: the catalog entry for this exact free id
+  // claims 200,000 and the gateway carries a marker planted mid-prompt far past
+  // it — recall holds through prompt_tokens=1,030,800, and an oversized request
+  // is refused with an empty-bodied 400 somewhere above ~1.05M. The published
+  // 200k belongs to the paid deepseek-v4-flash-free, a different model.
+  // Output 32,768 measured: the gateway ACCEPTS a larger max_tokens silently,
+  // but a completion forced to run long comes back finish_reason=length at
+  // exactly 32,768, so the permissive value is not a real ceiling.
+  "deepseek-v4.1-flash-free": { ctx: 1_048_576, max: 32_768, reasoning: true },
   // KiloCode Gateway
   "dots-studio/dots-3-note-preview:free": { ctx: 512_000, max: 512_000, reasoning: true },
   "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": { ctx: 256_000, max: 131_072, reasoning: true },
@@ -291,6 +303,27 @@ test("catalog spec lock: live-verified ctx/max/reasoning per model", () => {
   assert.equal(m!.reasoning, reasoning, `${id} reasoning`);
  }
  assert.equal(Object.keys(locked).length, ALL_MODELS.length, "every catalog model is spec-locked");
+});
+
+test("2026-10-15 Zen DeepSeek V4.1 Flash carries probe-measured specs", () => {
+ // The published entry for this exact free id claims 200,000 context and
+ // text-only input; live probes contradicted both. A static entry must
+ // override the enrichment heuristic, which would guess 262K / text-only off
+ // the substring rules ("deepseek" and "flash" both match).
+ const ds = getModelDef("deepseek-v4.1-flash-free");
+ assert.ok(ds);
+ assert.equal(ds.reasoning, true);
+ assert.equal(ds.contextWindow, 1_048_576);
+ assert.equal(ds.maxTokens, 32_768);
+ assert.deepEqual(ds.input, ["text", "image"]);
+ // Chat-only upstream: a Responses request is refused, so no api override.
+ assert.equal(ds.api, undefined);
+ // Every effort level is accepted live, so none may be locked off.
+ for (const level of ["minimal", "low", "medium", "high", "xhigh", "max"] as const) {
+  assert.equal(ds.thinkingLevelMap?.[level], level, `${level} must stay selectable`);
+ }
+ assert.equal(ds.thinkingLevelMap?.off, null);
+ assert.equal(getModelUpstream("deepseek-v4.1-flash-free"), "opencode");
 });
 
 test("new alias map resolves to canonical kilo ids", () => {

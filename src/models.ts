@@ -1,8 +1,8 @@
 /**
  * Static model definitions and upstream routing catalogs for pi-freeflow
  *
- * Defines the 34 verified free models (live-verified 2026-10-15):
- * - 10 OpenCode Zen models (2 Responses API + 8 Chat Completions)
+ * Defines the 35 verified free models (live-verified 2026-10-15):
+ * - 11 OpenCode Zen models (2 Responses API + 9 Chat Completions)
  * - 14 KiloCode Keyless Gateway models (OpenRouter format)
  * - 2 Cline direct-only models (per-user pool)
  * - 8 OVHcloud AI Endpoints models (keyless, direct-only)
@@ -200,6 +200,41 @@ export const OPENCODE_MODELS: ModelDef[] = [
   max: null,
  },
  },
+{
+  // Added 2026-10-15: new free model on the OpenCode Zen lane. Live-verified by
+  // probe, NOT copied from the published catalog — the entry for this exact
+  // free id claims 200,000 context, which the gateway contradicts (see below).
+  id: "deepseek-v4.1-flash-free",
+  name: "DeepSeek V4.1 Flash [OpenCode]",
+  reasoning: true,
+  // 1,048,576 measured, not assumed: a marker planted mid-prompt is still
+  // recalled through prompt_tokens=1,030,800, and the gateway turns an
+  // oversized request away with an empty-bodied 400 somewhere above ~1.05M.
+  // The published 200k belongs to the paid deepseek-v4-flash-free, a different
+  // model with a confusingly similar name. Acceptance is not capability; here
+  // the two agree, which is why this is the declared number.
+  contextWindow: 1_048_576,
+  // 32,768 measured: a completion forced to run that long comes back
+  // finish_reason=length at exactly that count. The gateway ACCEPTS a larger
+  // max_tokens without complaint, so the higher value is not a real ceiling.
+  maxTokens: 32_768,
+  // Chat Completions only — a Responses-shaped request is refused with
+  // 400 ModelProtocolUnsupported. `api` left unset, which means chat.
+  input: ["text", "image"],
+  // Vision verified live (a 1x1 PNG reads back as "Pink"). Video is not
+  // advertised for this model upstream, so it is not offered here.
+  // Every effort level is accepted and visibly changes reasoning length, so
+  // the whole ladder stays selectable; `off` is always null.
+  thinkingLevelMap: {
+   off: null,
+   minimal: "minimal",
+   low: "low",
+   medium: "medium",
+   high: "high",
+   xhigh: "xhigh",
+   max: "max",
+  },
+},
 ];
 
 /**
@@ -589,6 +624,7 @@ export const MODEL_ALIASES: Record<string, string> = {
  "longcat-2.5-preview": "longcat-2.5-preview-free",
  "longcat": "longcat-2.5-preview-free",
  "step-5-preview": "step-5-preview-free",
+ "deepseek-v4.1-flash": "deepseek-v4.1-flash-free",
  // provider-prefixed short aliases (slash-normalized)
  "laguna-s-2.1:free": "poolside/laguna-s-2.1:free",
  "laguna-xs-2.1:free": "poolside/laguna-xs-2.1:free",

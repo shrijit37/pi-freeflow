@@ -233,7 +233,7 @@ test("user flow [1/6] fresh install registers 37 models, binds a proxy, and onbo
    assert.equal(fs.readFileSync(ONBOARDED_FLAG_FILE, "utf8"), "1");
    assert.match(
     msgs[0],
-			/^freeflow ready: 34 free models via local proxy 127\.0\.0\.1:28180\. /,
+			/^freeflow ready: 35 free models via local proxy 127\.0\.0\.1:28180\. /,
     "welcome must announce the local proxy",
    );
 

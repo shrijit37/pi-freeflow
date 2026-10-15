@@ -1,6 +1,6 @@
 # Model Catalog & Upstream Routing
 
-pi-freeflow provides unified access to **34 curated free models** across four upstream providers: **OpenCode Zen**, **KiloCode Gateway**, **Cline**, and **OVHcloud AI Endpoints**.
+pi-freeflow provides unified access to **35 curated free models** across four upstream providers: **OpenCode Zen**, **KiloCode Gateway**, **Cline**, and **OVHcloud AI Endpoints**.
 
 ## Upstream Protocol Distinction
 
@@ -11,7 +11,7 @@ pi-freeflow provides unified access to **34 curated free models** across four up
 
 ### OpenCode Zen — Chat Completions (`/v1/chat/completions`)
 - **Endpoint**: `https://opencode.ai/inference/v1/chat/completions`
-- **Models**: 9 models (Cat Jam, Space Bunny, LongCat, MiMo, Nemotron, Big Pickle, Ling, etc.)
+- **Models**: 9 models (Cat Jam, DeepSeek V4.1 Flash, Space Bunny, LongCat, MiMo, Nemotron, Big Pickle, Ling, etc.)
 - **Config**: `api: "openai-completions"`, supports reasoning effort
 
 ### OpenCode Zen — Messages API (`/v1/messages`)
@@ -37,9 +37,9 @@ pi-freeflow provides unified access to **34 curated free models** across four up
 - **Routing**: direct only, never through the relay pool
 - **Config**: `api: "openai-completions"`. Chat is the only upstream shape: OVH's responses endpoint rejects every array `input` with `422 input: data did not match any variant of untagged enum ResponseInput` and accepts only a bare string, so a responses-path request is translated to chat upstream and the answer mapped back — the same shape mapping the Cline lane uses.
 
-## 34 Model Specifications
+## 35 Model Specifications
 
-### OpenCode Zen (10 models)
+### OpenCode Zen (11 models)
 
 | Model ID | Context | Max Output | Thinking | Vision |
 | :--- | ---: | ---: | :--- | :--- |
@@ -53,6 +53,8 @@ pi-freeflow provides unified access to **34 curated free models** across four up
 | `space-bunny-free` | 1,048,576 | 524,288 | low..max | ✅ |
 | `longcat-2.5-preview-free` | 1,000,000 | 131,072 | minimal..max | ✅ |
 | `step-5-preview-free` | 1,000,000 | 65,536 | low..high | ✅ |
+| `deepseek-v4.1-flash-free` | 1,048,576 | 32,768 | minimal..max | ✅ |
+
 ### KiloCode Gateway (14 models)
 
 | Model ID | Context | Max Output | Thinking | Vision |

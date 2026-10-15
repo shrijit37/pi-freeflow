@@ -42,7 +42,7 @@ test("health returns 200 with active, mode, relays and catalog 34", async () => 
   assert.equal(json.active, "https://relay.example.com");
   assert.equal(json.mode, "auto");
   assert.equal(json.enabled, true);
-		assert.equal(json.catalog, 34);
+		assert.equal(json.catalog, 35);
   assert.equal(typeof json.version, "string");
   assert.ok(json.version.length > 0, "health must report daemon version for stale-detection");
   assert.ok(Array.isArray(json.relays));
@@ -54,7 +54,7 @@ test("health returns 200 with active, mode, relays and catalog 34", async () => 
 
   // Also verify getHealthData directly
   const direct = getHealthData(port);
-		assert.equal(direct.catalog, 34);
+		assert.equal(direct.catalog, 35);
   assert.equal(direct.port, port);
  } finally {
   await new Promise<void>((r) => server!.close(() => r()));
@@ -73,7 +73,7 @@ test("hidden widget still returns health", async () => {
   const res = await fetch(`http://127.0.0.1:${port}/_health`);
   assert.equal(res.status, 200);
   const json = await res.json() as { catalog: number; relays: unknown[] };
-		assert.equal(json.catalog, 34);
+		assert.equal(json.catalog, 35);
   assert.ok(Array.isArray(json.relays));
  } finally {
   await new Promise<void>((r) => server!.close(() => r()));
@@ -105,7 +105,7 @@ test("health is loopback only - rejects non-loopback", async () => {
  assert.equal(handled2, true);
  assert.equal(res2.status, 200);
  const body = JSON.parse(res2.body) as { catalog: number };
-	assert.equal(body.catalog, 34);
+	assert.equal(body.catalog, 35);
 
  // Non-health path not handled
  const req3 = {
@@ -128,7 +128,7 @@ test("health with empty pool returns 200 and catalog 34", async () => {
   const res = await fetch(`http://127.0.0.1:${port}/_health`);
   assert.equal(res.status, 200);
   const json = await res.json() as { catalog: number; relays: unknown[]; enabled: boolean; port: number };
-		assert.equal(json.catalog, 34);
+		assert.equal(json.catalog, 35);
   assert.equal(json.relays.length, 0);
   assert.equal(json.enabled, false);
   assert.equal(json.port, port);
@@ -137,7 +137,7 @@ test("health with empty pool returns 200 and catalog 34", async () => {
   const res2 = await fetch(`http://127.0.0.1:${port}/health`);
   assert.equal(res2.status, 200);
   const json2 = await res2.json() as { catalog: number };
-		assert.equal(json2.catalog, 34);
+		assert.equal(json2.catalog, 35);
  } finally {
   await new Promise<void>((r) => server!.close(() => r()));
   setActiveRelayState(orig, false);
